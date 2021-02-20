@@ -47,7 +47,7 @@ import org.slf4j.LoggerFactory;
 @RunWith(MockitoJUnitRunner.class)
 public class ParquetUtilTest {
 	
-	private static final Logger log = LoggerFactory.getLogger(ParquetUtil.class);
+	private static final Logger log = LoggerFactory.getLogger(ParquetUtilTest.class);
 	
 	private static final String PARQUET_ROOT = "/parquet_root";
 	
@@ -129,6 +129,7 @@ public class ParquetUtilTest {
 		Bundle bundle = parser.parseResource(Bundle.class, patientBundle);
 		GenericRecord record = parquetUtil.convertToAvro(bundle.getEntry().get(0).getResource());
 		Collection<Object> addressList = (Collection<Object>) record.get("address");
+		assertThat(record.get("id"), equalTo("471be3bc-08c7-4d78-a4ab-1b3d044dae67"));
 		assertThat(addressList.size(), equalTo(1));
 		Record address = (Record) addressList.iterator().next();
 		assertThat((String) address.get("city"), equalTo("Waterloo"));
@@ -199,6 +200,8 @@ public class ParquetUtilTest {
 	
 	@Test
 	public void createSingleOutputWithRowGroupSize() throws IOException {
+		// TODO: Reduce the huge amount of log that this test produces due to:
+		// WARN - InternalParquetRecordWriter.flushRowGroupToStore(167) | Too much memory used: ...
 		initilizeLocalFileSystem();
 		parquetUtil = new ParquetUtil(rootPath.toString(), 0, 1, fileSystem);
 		IParser parser = fhirContext.newJsonParser();

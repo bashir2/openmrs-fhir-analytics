@@ -107,13 +107,13 @@
     <dependency>
       <groupId>com.cerner.bunsen</groupId>
       <artifactId>bunsen-core-stu3</artifactId>
-      <version>0.5.7</version>
+      <version>${bunsenVersion}</version>
     </dependency>
 
     <dependency>
       <groupId>com.cerner.bunsen</groupId>
       <artifactId>bunsen-avro</artifactId>
-      <version>0.5.7</version>
+      <version>${bunsenVersion}</version>
     </dependency>
 
 	<dependency>
