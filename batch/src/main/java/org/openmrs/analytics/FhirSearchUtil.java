@@ -37,9 +37,11 @@ public class FhirSearchUtil {
 	
 	Bundle searchByUrl(String searchUrl, int count, SummaryEnum summaryMode) {
 		try {
+			log.info("DEBUG fetching url: " + searchUrl.substring(0, Math.min(200, searchUrl.length())));
 			IGenericClient client = openmrsUtil.getSourceClient();
 			Bundle result = client.search().byUrl(searchUrl).count(count).summaryMode(summaryMode).returnBundle(Bundle.class)
 			        .execute();
+			log.info("DEBUG done fetching url: " + searchUrl.substring(0, Math.min(200, searchUrl.length())));
 			return result;
 		}
 		catch (Exception e) {
