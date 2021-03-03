@@ -31,7 +31,9 @@ import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.AvroCoder;
 import org.apache.beam.sdk.coders.CannotProvideCoderException;
 import org.apache.beam.sdk.io.AvroIO;
+import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.jdbc.JdbcIO;
+import org.apache.beam.sdk.io.parquet.ParquetIO;
 import org.apache.beam.sdk.metrics.Counter;
 import org.apache.beam.sdk.metrics.MetricNameFilter;
 import org.apache.beam.sdk.metrics.MetricQueryResults;
@@ -183,12 +185,18 @@ public class FhirEtl {
 		String getTableFhirMapPath();
 		
 		void setTableFhirMapPath(String value);
-		
+
 		@Description("Flag to switch between the 2 modes of batch extract")
 		@Default.Boolean(false)
 		Boolean isJdbcModeEnabled();
-		
+
 		void setJdbcModeEnabled(Boolean value);
+
+		@Description("Number of output file shards to use; default 0 leaves it to the runner to decide.")
+		@Default.Integer(0)
+		int getNumParquetShards();
+		
+		void setNumParquetShards(int value);
 	}
 	
 	static FhirSearchUtil createFhirSearchUtil(FhirEtlOptions options, FhirContext fhirContext) {
@@ -234,10 +242,10 @@ public class FhirEtl {
 		}
 		return segmentMap;
 	}
-	
+
+	// TODO: Move this class and a few static methods after it to a separate file with unit-tests.
 	static class FetchSearchPageFn extends DoFn<SearchSegmentDescriptor, GenericRecord> {
-		//static class FetchSearchPageFn extends DoFn<SearchSegmentDescriptor, String> {
-		
+
 		private final Counter numFetchedResources = Metrics.counter(METRICS_NAMESPACE, "numFetchedResources");
 		
 		private final Counter totalGenerateTimeMillis = Metrics.counter(METRICS_NAMESPACE, "totalGenerateTimeMillis");
@@ -291,7 +299,6 @@ public class FhirEtl {
 		
 		@ProcessElement
 		public void ProcessElement(@Element SearchSegmentDescriptor segment, OutputReceiver<GenericRecord> out) {
-			//public void ProcessElement(@Element SearchSegmentDescriptor segment, OutputReceiver<String> out) {
 			log.debug("Fetching bundle: " + segment.searchUrl());
 			long fetchStartTime = System.currentTimeMillis();
 			Bundle pageBundle = fhirSearchUtil.searchByUrl(segment.searchUrl(), segment.count(), SummaryEnum.DATA);
@@ -302,8 +309,6 @@ public class FhirEtl {
 				numFetchedResources.inc(recordList.size());
 				for (GenericRecord record : recordList) {
 					out.output(record);
-					//out.output(record.get("id").toString());
-					//out.output(record.toString());
 				}
 				totalGenerateTimeMillis.inc(System.currentTimeMillis() - startTime);
 			}
@@ -335,7 +340,6 @@ public class FhirEtl {
 		ParquetUtil parquetUtil = new ParquetUtil(options.getFileParquetPath());
 		Schema schema = parquetUtil.getResourceSchema(resourceType);
 		PCollection<GenericRecord> records = inputSegments
-		        //PCollection<String> records = inputSegments
 		        .apply(ParDo.of(new FetchSearchPageFn(options.getFhirSinkPath(), options.getSinkUserName(),
 		                options.getSinkPassword(), options.getOpenmrsServerUrl() + options.getServerFhirEndpoint(),
 		                options.getFileParquetPath(), options.getOpenmrsUserName(), options.getOpenmrsPassword())))
@@ -343,23 +347,9 @@ public class FhirEtl {
 		if (!options.getFileParquetPath().isEmpty()) {
 			// TODO: Make sure getFileParquetPath() is a directory.
 			String outputFile = options.getFileParquetPath() + resourceType;
-			//ParquetIO.Sink sink = ParquetIO.sink(schema).withCompressionCodec(CompressionCodecName.UNCOMPRESSED);
-			//records.apply(FileIO.<GenericRecord> write().via(sink).to(outputFile));
-			records.apply("WriteToAvro",
-			    AvroIO.writeGenericRecords(schema).to(outputFile).withSuffix(".avro").withNumShards(3));
-			//records.apply("WriteToText", TextIO.write().to(outputFile).withSuffix(".txt").withNumShards(1));
-			/*
-			records.apply("TEMP_ParDo", ParDo.of(new DoFn<GenericRecord, String>() {
-				
-				@ProcessElement
-				public void processElement(@Element GenericRecord record, OutputReceiver<String> r) {
-					if (record != null) {
-						//r.output(KV.of(resourceType, element));
-						log.info("DEBUG done for " + record.get("id"));
-					}
-				}
-			}));
-			 */
+			ParquetIO.Sink sink = ParquetIO.sink(schema); // TODO add an option for .withCompressionCodec();
+			records.apply(FileIO.<GenericRecord> write().via(sink).to(outputFile).withSuffix(".parquet")
+			        .withNumShards(options.getNumParquetShards()));
 		}
 	}
 	
@@ -416,6 +406,9 @@ public class FhirEtl {
 		ParquetUtil.initializeAvroConverters();
 		
 		if (options.isJdbcModeEnabled()) {
+		  if (options.getNumParquetShards() == 0) {
+				log.warn("Not setting --numParquetShards in JDBC mode can hinder the performance significantly!");
+			}
 			runFhirJdbcFetch(options, fhirContext);
 		} else {
 			runFhirFetch(options, fhirContext);
