@@ -31,6 +31,7 @@ import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.AvroCoder;
 import org.apache.beam.sdk.coders.CannotProvideCoderException;
 import org.apache.beam.sdk.io.FileIO;
+import org.apache.beam.sdk.io.TextIO;
 import org.apache.beam.sdk.io.jdbc.JdbcIO;
 import org.apache.beam.sdk.io.parquet.ParquetIO;
 import org.apache.beam.sdk.metrics.Counter;
@@ -50,6 +51,7 @@ import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.PCollection;
 import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.Bundle.BundleEntryComponent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -141,9 +143,9 @@ public class FhirEtl {
 		
 		@Description("The base name for output Parquet file; for each resource, one fileset will be created.")
 		@Default.String("")
-		String getFileParquetPath();
+		String getOutputFilePath();
 		
-		void setFileParquetPath(String value);
+		void setOutputFilePath(String value);
 		
 		/**
 		 * JDBC DB settings: defaults values have been pointed to ./openmrs-compose.yaml
@@ -202,6 +204,12 @@ public class FhirEtl {
 		int getNumParquetShards();
 		
 		void setNumParquetShards(int value);
+		
+		@Description("Whether to output in JSON format; this is currently intended for test only.")
+		@Default.Boolean(false)
+		boolean getTextOutput();
+		
+		void setTextOutput(boolean value);
 	}
 	
 	static FhirSearchUtil createFhirSearchUtil(FhirEtlOptions options, FhirContext fhirContext) {
@@ -249,11 +257,9 @@ public class FhirEtl {
 	}
 	
 	// TODO: Move this class and a few static methods after it to a separate file with unit-tests.
-	static class FetchSearchPageFn extends DoFn<SearchSegmentDescriptor, GenericRecord> {
+	static class FetchSearchPageFn extends DoFn<SearchSegmentDescriptor, Bundle> {
 		
 		private final Counter numFetchedResources;
-		
-		private final Counter totalGenerateTimeMillis;
 		
 		private final Counter totalFetchTimeMillis;
 		
@@ -269,11 +275,7 @@ public class FhirEtl {
 		
 		private final String sinkPassword;
 		
-		private final String parquetFile;
-		
 		private final String resourceType;
-		
-		private ParquetUtil parquetUtil;
 		
 		private FhirContext fhirContext;
 		
@@ -283,18 +285,15 @@ public class FhirEtl {
 		
 		private OpenmrsUtil openmrsUtil;
 		
-		FetchSearchPageFn(String fhirSinkPath, String sinkUsername, String sinkPassword, String sourceUrl,
-		    String parquetFile, String sourceUser, String sourcePw, String resourceType) {
-			this.sinkPath = fhirSinkPath;
-			this.sinkUsername = sinkUsername;
-			this.sinkPassword = sinkPassword;
-			this.sourceUrl = sourceUrl;
-			this.sourceUser = sourceUser;
-			this.sourcePw = sourcePw;
-			this.parquetFile = parquetFile;
+		FetchSearchPageFn(FhirEtlOptions options, String resourceType) {
+			this.sinkPath = options.getFhirSinkPath();
+			this.sinkUsername = options.getSinkUserName();
+			this.sinkPassword = options.getSinkPassword();
+			this.sourceUrl = options.getOpenmrsServerUrl() + options.getServerFhirEndpoint();
+			this.sourceUser = options.getOpenmrsUserName();
+			this.sourcePw = options.getOpenmrsPassword();
 			this.resourceType = resourceType;
 			this.numFetchedResources = Metrics.counter(METRICS_NAMESPACE, "numFetchedResources_" + resourceType);
-			this.totalGenerateTimeMillis = Metrics.counter(METRICS_NAMESPACE, "totalGenerateTimeMillis_" + resourceType);
 			this.totalFetchTimeMillis = Metrics.counter(METRICS_NAMESPACE, "totalFetchTimeMillis_" + resourceType);
 		}
 		
@@ -305,28 +304,61 @@ public class FhirEtl {
 			    fhirContext.getRestfulClientFactory());
 			openmrsUtil = createOpenmrsUtil(sourceUrl, sourceUser, sourcePw, fhirContext);
 			fhirSearchUtil = new FhirSearchUtil(openmrsUtil);
-			parquetUtil = new ParquetUtil(parquetFile);
 		}
 		
 		@ProcessElement
-		public void ProcessElement(@Element SearchSegmentDescriptor segment, OutputReceiver<GenericRecord> out) {
+		public void ProcessElement(@Element SearchSegmentDescriptor segment, OutputReceiver<Bundle> out) {
 			String searchUrl = segment.searchUrl();
 			log.info(String.format("Fetching %d %s resources: %s", segment.count(), this.resourceType,
 			    searchUrl.substring(0, Math.min(200, searchUrl.length()))));
 			long fetchStartTime = System.currentTimeMillis();
 			Bundle pageBundle = fhirSearchUtil.searchByUrl(searchUrl, segment.count(), SummaryEnum.DATA);
 			totalFetchTimeMillis.inc(System.currentTimeMillis() - fetchStartTime);
-			if (!parquetFile.isEmpty()) {
-				long startTime = System.currentTimeMillis();
-				List<GenericRecord> recordList = parquetUtil.generateRecords(pageBundle);
-				numFetchedResources.inc(recordList.size());
-				for (GenericRecord record : recordList) {
-					out.output(record);
-				}
-				totalGenerateTimeMillis.inc(System.currentTimeMillis() - startTime);
+			if (pageBundle != null && pageBundle.getEntry() != null) {
+				numFetchedResources.inc(pageBundle.getEntry().size());
+				out.output(pageBundle);
 			}
-			if (!sinkPath.isEmpty()) {
+			if (!this.sinkPath.isEmpty()) {
 				fhirStoreUtil.uploadBundle(pageBundle);
+			}
+		}
+	}
+	
+	static class BundleToAvro extends DoFn<Bundle, GenericRecord> {
+		
+		private final Counter totalGenerateTimeMillis;
+		
+		private final String parquetFile;
+		
+		private ParquetUtil parquetUtil;
+		
+		BundleToAvro(String parquetFile, String resourceType) {
+			this.parquetFile = parquetFile;
+			this.totalGenerateTimeMillis = Metrics.counter(METRICS_NAMESPACE, "totalGenerateTimeMillis_" + resourceType);
+		}
+		
+		@Setup
+		public void Setup() {
+			parquetUtil = new ParquetUtil(this.parquetFile);
+		}
+		
+		@ProcessElement
+		public void ProcessElement(@Element Bundle bundle, OutputReceiver<GenericRecord> out) {
+			long startTime = System.currentTimeMillis();
+			List<GenericRecord> recordList = parquetUtil.generateRecords(bundle);
+			for (GenericRecord record : recordList) {
+				out.output(record);
+			}
+			totalGenerateTimeMillis.inc(System.currentTimeMillis() - startTime);
+		}
+	}
+	
+	static class BundleToJson extends DoFn<Bundle, String> {
+		
+		@ProcessElement
+		public void ProcessElement(@Element Bundle bundle, OutputReceiver<String> out) {
+			for (BundleEntryComponent entry : bundle.getEntry()) {
+				out.output(entry.getResource().toString());
 			}
 		}
 	}
@@ -350,20 +382,26 @@ public class FhirEtl {
 	private static void fetchSegments(PCollection<SearchSegmentDescriptor> inputSegments, String search,
 	        FhirEtlOptions options) {
 		String resourceType = findSearchedResource(search);
-		ParquetUtil parquetUtil = new ParquetUtil(options.getFileParquetPath());
+		ParquetUtil parquetUtil = new ParquetUtil(options.getOutputFilePath());
 		Schema schema = parquetUtil.getResourceSchema(resourceType);
-		PCollection<GenericRecord> records = inputSegments
-		        .apply(ParDo.of(
-		            new FetchSearchPageFn(options.getFhirSinkPath(), options.getSinkUserName(), options.getSinkPassword(),
-		                    options.getOpenmrsServerUrl() + options.getServerFhirEndpoint(), options.getFileParquetPath(),
-		                    options.getOpenmrsUserName(), options.getOpenmrsPassword(), resourceType)))
-		        .setCoder(AvroCoder.of(GenericRecord.class, schema));
-		if (!options.getFileParquetPath().isEmpty()) {
-			// TODO: Make sure getFileParquetPath() is a directory.
-			String outputFile = options.getFileParquetPath() + resourceType;
-			ParquetIO.Sink sink = ParquetIO.sink(schema); // TODO add an option for .withCompressionCodec();
-			records.apply(FileIO.<GenericRecord> write().via(sink).to(outputFile).withSuffix(".parquet")
-			        .withNumShards(options.getNumParquetShards()));
+		PCollection<Bundle> bundles = inputSegments.apply(ParDo.of(new FetchSearchPageFn(options, resourceType)));
+		if (!options.getOutputFilePath().isEmpty()) { // TODO separate text output.
+			if (options.getTextOutput()) {
+				PCollection<String> jsonRecords = bundles.apply(ParDo.of(new BundleToJson()));
+				jsonRecords.apply("WriteToText", TextIO.write().to(options.getOutputFilePath()).withSuffix(".txt"));
+			} else {
+				PCollection<GenericRecord> records = bundles
+				        .apply(ParDo.of(new BundleToAvro(options.getOutputFilePath(), resourceType)))
+				        .setCoder(AvroCoder.of(GenericRecord.class, schema));
+				// TODO: Make sure getOutputFilePath() is a directory.
+				String outputFile = options.getOutputFilePath() + resourceType;
+				ParquetIO.Sink sink = ParquetIO.sink(schema); // TODO add an option for .withCompressionCodec();
+				records.apply(FileIO.<GenericRecord> write().via(sink).to(outputFile).withSuffix(".parquet")
+				        .withNumShards(options.getNumParquetShards()));
+				// TODO add Avro output option
+				//records.apply("WriteToAvro", AvroIO.writeGenericRecords(schema).to(outputFile).withSuffix(".avro")
+				//        .withNumShards(options.getNumParquetShards()));
+			}
 		}
 	}
 	
@@ -418,7 +456,7 @@ public class FhirEtl {
 		FhirContext fhirContext = FhirContext.forR4();
 		
 		FhirEtlOptions options = PipelineOptionsFactory.fromArgs(args).withValidation().as(FhirEtlOptions.class);
-		if (!options.getFileParquetPath().isEmpty() && options.getNumParquetShards() == 0) {
+		if (!options.getOutputFilePath().isEmpty() && options.getNumParquetShards() == 0) {
 			log.warn("Setting --numParquetShards=0 can hinder Parquet generation performance significantly!");
 		}
 		
