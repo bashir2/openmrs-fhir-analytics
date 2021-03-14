@@ -42,9 +42,9 @@ public class BaseArgs {
 	        + "writers with non-empty content are flushed to files; use 0 to disable.")
 	public int secondsToFlushParquetFiles = 3600;
 	
-	@Parameter(names = { "--rowGroupSizeForParquetFiles" }, description = "The approximate size (bytes) of "
+	@Parameter(names = { "--parquetRowGroupSize" }, description = "The approximate uncompressed size (bytes) of "
 	        + "the row-groups in Parquet files. When this size is reached, the content is flushed to disk. "
 	        + "This won't be triggered if there are less than 100 records. Use 0 to fall back to the "
 	        + "default row-group size.")
-	public int rowGroupSizeForParquetFiles = 0;
+	public int parquetRowGroupSize = 0;
 }

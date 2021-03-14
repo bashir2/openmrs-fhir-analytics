@@ -165,4 +165,13 @@ public interface FhirEtlOptions extends PipelineOptions {
 	int getNumFileShards();
 	
 	void setNumFileShards(int value);
+	
+	@Description("The approximate uncompressed size (bytes) of the row-groups in Parquet files."
+	        + "When this size is reached, the content is supposed to be flushed to disk. "
+	        + "This won't be triggered if there are less than 100 records. Use 0 to fall back to the "
+	        + "default row-group size.")
+	@Default.Integer(0)
+	int getParquetRowGroupSize();
+	
+	void setParquetRowGroupSize(int value);
 }

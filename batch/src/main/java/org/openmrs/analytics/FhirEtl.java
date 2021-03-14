@@ -18,6 +18,7 @@ import java.beans.PropertyVetoException;
 import java.io.IOException;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -115,6 +116,9 @@ public class FhirEtl {
 			// TODO: Make sure getOutputParquetPath() is a directory.
 			String outputFile = options.getOutputParquetPath() + resourceType;
 			ParquetIO.Sink sink = ParquetIO.sink(schema); // TODO add an option for .withCompressionCodec();
+			if (options.getParquetRowGroupSize() > 0) {
+				sink = sink.withRowGroupSize(options.getParquetRowGroupSize());
+			}
 			records.get(fetchSearchPageFn.avroTag).apply(FileIO.<GenericRecord> write().via(sink).to(outputFile)
 			        .withSuffix(".parquet").withNumShards(options.getNumFileShards()));
 			// TODO add Avro output option
@@ -178,6 +182,7 @@ public class FhirEtl {
 		FhirContext fhirContext = FhirContext.forR4();
 		
 		FhirEtlOptions options = PipelineOptionsFactory.fromArgs(args).withValidation().as(FhirEtlOptions.class);
+		log.info("Pipeline options: " + Arrays.toString(args));
 		if (options.getNumFileShards() == 0) {
 			if (!options.getOutputParquetPath().isEmpty() || !options.getOutputJsonPath().isEmpty())
 				log.warn("Setting --numFileShards=0 can hinder output file generation performance significantly!");
