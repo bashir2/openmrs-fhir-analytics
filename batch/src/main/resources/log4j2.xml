@@ -25,5 +25,6 @@
 		<Root level="INFO">
 			<AppenderRef ref="CONSOLE" />
 		</Root>
+		<Logger name="org.apache.parquet.io" level="DEBUG" />
 	</Loggers>
 </Configuration>
