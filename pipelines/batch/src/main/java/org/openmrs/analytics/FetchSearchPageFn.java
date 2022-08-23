@@ -13,7 +13,9 @@
 // limitations under the License.
 package org.openmrs.analytics;
 
+import java.beans.PropertyVetoException;
 import java.io.IOException;
+import java.sql.SQLException;
 
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.parser.IParser;
@@ -23,6 +25,8 @@ import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.values.KV;
 import org.hl7.fhir.r4.model.Bundle;
+import org.hl7.fhir.r4.model.Bundle.BundleEntryComponent;
+import org.hl7.fhir.r4.model.Resource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -65,6 +69,22 @@ abstract class FetchSearchPageFn<T> extends DoFn<T, KV<String, Integer>> {
 	
 	private final int rowGroupSize;
 	
+	private final String sinkDbUrl;
+	
+	private final String sinkDbUsername;
+	
+	private final String sinkDbPassword;
+	
+	private final String sinkDbTableName;
+	
+	private final boolean useSingleSinkDbTable;
+	
+	private final String jdbcDriverClass;
+	
+	private final int initialPoolSize;
+	
+	private final int maxPoolSize;
+	
 	@VisibleForTesting
 	protected ParquetUtil parquetUtil;
 	
@@ -73,6 +93,8 @@ abstract class FetchSearchPageFn<T> extends DoFn<T, KV<String, Integer>> {
 	protected FhirSearchUtil fhirSearchUtil;
 	
 	private FhirStoreUtil fhirStoreUtil;
+	
+	private JdbcResourceWriter jdbcWriter;
 	
 	private IParser parser;
 	
@@ -87,6 +109,15 @@ abstract class FetchSearchPageFn<T> extends DoFn<T, KV<String, Integer>> {
 		this.parquetFile = options.getOutputParquetPath();
 		this.secondsToFlush = options.getSecondsToFlushParquetFiles();
 		this.rowGroupSize = options.getRowGroupSizeForParquetFiles();
+		this.sinkDbUrl = options.getSinkDbUrl();
+		this.sinkDbTableName = options.getSinkDbTablePrefix();
+		this.sinkDbUsername = options.getSinkDbUsername();
+		this.sinkDbPassword = options.getSinkDbPassword();
+		this.useSingleSinkDbTable = options.getUseSingleSinkTable();
+		this.initialPoolSize = options.getJdbcInitialPoolSize();
+		this.maxPoolSize = options.getJdbcMaxPoolSize();
+		// We are assuming that the potential source and sink DBs are the same type.
+		this.jdbcDriverClass = options.getJdbcDriverClass();
 		this.numFetchedResources = Metrics.counter(EtlUtils.METRICS_NAMESPACE, "numFetchedResources_" + stageIdentifier);
 		this.totalFetchTimeMillis = Metrics.counter(EtlUtils.METRICS_NAMESPACE, "totalFetchTimeMillis_" + stageIdentifier);
 		this.totalGenerateTimeMillis = Metrics.counter(EtlUtils.METRICS_NAMESPACE,
@@ -95,13 +126,19 @@ abstract class FetchSearchPageFn<T> extends DoFn<T, KV<String, Integer>> {
 	}
 	
 	@Setup
-	public void setup() {
+	public void setup() throws SQLException, PropertyVetoException {
 		FhirContext fhirContext = FhirContext.forR4();
 		fhirStoreUtil = FhirStoreUtil.createFhirStoreUtil(sinkPath, sinkUsername, sinkPassword,
 		    fhirContext.getRestfulClientFactory());
 		openmrsUtil = new OpenmrsUtil(sourceUrl, sourceUser, sourcePw, fhirContext);
 		fhirSearchUtil = new FhirSearchUtil(openmrsUtil);
 		parquetUtil = new ParquetUtil(parquetFile, secondsToFlush, rowGroupSize, stageIdentifier + "_");
+		if (!sinkDbUrl.isEmpty()) {
+			// TODO consider using JdbcIo instead of creating separate connection pools for each worker.
+			log.info("Creating a JdbcConnectionUtil in FetchSearchPageFn setup for " + sinkDbUrl);
+			jdbcWriter = new JdbcResourceWriter(new JdbcConnectionUtil(jdbcDriverClass, sinkDbUrl, sinkDbUsername,
+			        sinkDbPassword, initialPoolSize, maxPoolSize), sinkDbTableName, useSingleSinkDbTable, fhirContext);
+		}
 		parser = fhirContext.newJsonParser();
 	}
 	
@@ -114,7 +151,7 @@ abstract class FetchSearchPageFn<T> extends DoFn<T, KV<String, Integer>> {
 		totalFetchTimeMillis.inc(millis);
 	}
 	
-	protected void processBundle(Bundle bundle) throws IOException {
+	protected void processBundle(Bundle bundle) throws IOException, SQLException {
 		if (bundle != null && bundle.getEntry() != null) {
 			numFetchedResources.inc(bundle.getEntry().size());
 			if (!parquetFile.isEmpty()) {
@@ -126,6 +163,15 @@ abstract class FetchSearchPageFn<T> extends DoFn<T, KV<String, Integer>> {
 				long pushStartTime = System.currentTimeMillis();
 				fhirStoreUtil.uploadBundle(bundle);
 				totalPushTimeMillis.inc(System.currentTimeMillis() - pushStartTime);
+			}
+			if (!this.sinkDbUrl.isEmpty()) {
+				if (bundle.getTotal() == 0) {
+					return;
+				}
+				for (BundleEntryComponent entry : bundle.getEntry()) {
+					Resource resource = entry.getResource();
+					jdbcWriter.writeResource(resource);
+				}
 			}
 		}
 	}

@@ -14,7 +14,9 @@
 
 package org.openmrs.analytics;
 
+import java.beans.PropertyVetoException;
 import java.io.IOException;
+import java.sql.SQLException;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.Arrays;
@@ -29,10 +31,14 @@ import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.transforms.DoFn;
 import org.hl7.fhir.r4.model.Meta;
 import org.hl7.fhir.r4.model.Resource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 // TODO: A good amount of functionality/setup here is shared with FetchSearchPageFn. 
 // There is room for refactoring in the future.
 public class ConvertResourceFn extends DoFn<HapiRowDescriptor, Integer> {
+	
+	private static final Logger log = LoggerFactory.getLogger(ConvertResourceFn.class);
 	
 	private final HashMap<String, Counter> numFetchedResources;
 	
@@ -54,6 +60,22 @@ public class ConvertResourceFn extends DoFn<HapiRowDescriptor, Integer> {
 	
 	private final int rowGroupSize;
 	
+	private final String sinkDbUrl;
+	
+	private final String sinkDbUsername;
+	
+	private final String sinkDbPassword;
+	
+	private final String sinkDbTableName;
+	
+	private final boolean useSingleSinkDbTable;
+	
+	private final String jdbcDriverClass;
+	
+	private final int initialPoolSize;
+	
+	private final int maxPoolSize;
+	
 	@VisibleForTesting
 	protected ParquetUtil parquetUtil;
 	
@@ -63,6 +85,8 @@ public class ConvertResourceFn extends DoFn<HapiRowDescriptor, Integer> {
 	
 	private IParser parser;
 	
+	private JdbcResourceWriter jdbcWriter;
+	
 	ConvertResourceFn(FhirEtlOptions options) {
 		this.sinkPath = options.getFhirSinkPath();
 		this.sinkUsername = options.getSinkUserName();
@@ -70,6 +94,15 @@ public class ConvertResourceFn extends DoFn<HapiRowDescriptor, Integer> {
 		this.parquetFile = options.getOutputParquetPath();
 		this.secondsToFlush = options.getSecondsToFlushParquetFiles();
 		this.rowGroupSize = options.getRowGroupSizeForParquetFiles();
+		this.sinkDbUrl = options.getSinkDbUrl();
+		this.sinkDbTableName = options.getSinkDbTablePrefix();
+		this.sinkDbUsername = options.getSinkDbUsername();
+		this.sinkDbPassword = options.getSinkDbPassword();
+		this.useSingleSinkDbTable = options.getUseSingleSinkTable();
+		this.initialPoolSize = options.getJdbcInitialPoolSize();
+		this.maxPoolSize = options.getJdbcMaxPoolSize();
+		// We are assuming that the potential source and sink DBs are the same type.
+		this.jdbcDriverClass = options.getJdbcDriverClass();
 		
 		this.numFetchedResources = new HashMap<String, Counter>();
 		this.totalParseTimeMillis = new HashMap<String, Counter>();
@@ -89,7 +122,7 @@ public class ConvertResourceFn extends DoFn<HapiRowDescriptor, Integer> {
 	}
 	
 	@Setup
-	public void setup() {
+	public void setup() throws PropertyVetoException, SQLException {
 		FhirContext fhirContext = FhirContext.forR4();
 		//This increases the socket timeout value for the RESTful client; the default is 10000 ms.
 		fhirContext.getRestfulClientFactory().setSocketTimeout(20000);
@@ -98,6 +131,12 @@ public class ConvertResourceFn extends DoFn<HapiRowDescriptor, Integer> {
 		parquetUtil = new ParquetUtil(parquetFile, secondsToFlush, rowGroupSize, "");
 		parser = fhirContext.newJsonParser();
 		simpleDateFormat = new SimpleDateFormat("yyyy-MM-dd hh:mm:ss");
+		if (!sinkDbUrl.isEmpty()) {
+			// TODO consider using JdbcIo instead of creating separate connection pools for each worker.
+			log.info("Creating a JdbcConnectionUtil in ConvertResourceFn setup for " + sinkDbUrl);
+			jdbcWriter = new JdbcResourceWriter(new JdbcConnectionUtil(jdbcDriverClass, sinkDbUrl, sinkDbUsername,
+			        sinkDbPassword, initialPoolSize, maxPoolSize), sinkDbTableName, useSingleSinkDbTable, fhirContext);
+		}
 	}
 	
 	@Teardown
@@ -105,7 +144,7 @@ public class ConvertResourceFn extends DoFn<HapiRowDescriptor, Integer> {
 		parquetUtil.closeAllWriters();
 	}
 	
-	public void writeResource(HapiRowDescriptor element) throws IOException, ParseException {
+	public void writeResource(HapiRowDescriptor element) throws IOException, ParseException, SQLException {
 		String resourceId = element.resourceId();
 		String resourceType = element.resourceType();
 		Meta meta = new Meta().setVersionId(element.resourceVersion())
@@ -130,10 +169,13 @@ public class ConvertResourceFn extends DoFn<HapiRowDescriptor, Integer> {
 			fhirStoreUtil.uploadResource(resource);
 			totalPushTimeMillis.get(resourceType).inc(System.currentTimeMillis() - startTime);
 		}
+		if (!this.sinkDbUrl.isEmpty()) {
+			jdbcWriter.writeResource(resource);
+		}
 	}
 	
 	@ProcessElement
-	public void processElement(ProcessContext processContext) throws IOException, ParseException {
+	public void processElement(ProcessContext processContext) throws IOException, ParseException, SQLException {
 		HapiRowDescriptor element = processContext.element();
 		writeResource(element);
 	}

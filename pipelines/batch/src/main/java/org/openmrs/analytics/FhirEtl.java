@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Set;
 
 import ca.uhn.fhir.context.FhirContext;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
@@ -187,7 +188,7 @@ public class FhirEtl {
 		EtlUtils.logMetrics(result.metrics());
 	}
 	
-	static void validateOptions(FhirEtlOptions options) {
+	static void validateOptionsAndInit(FhirEtlOptions options) throws SQLException, PropertyVetoException {
 		if (!options.getActivePeriod().isEmpty()) {
 			Set<String> resourceSet = Sets.newHashSet(options.getResourceList().split(","));
 			if (resourceSet.contains("Patient")) {
@@ -200,6 +201,10 @@ public class FhirEtl {
 				        "When using --activePeriod feature, 'Encounter' should be in --resourceList got: "
 				                + options.getResourceList());
 			}
+		}
+		if (!options.getSinkDbUrl().isEmpty()) {
+			Preconditions.checkArgument(!options.getSinkDbTablePrefix().isEmpty());
+			JdbcResourceWriter.createTables(options);
 		}
 	}
 	
@@ -249,7 +254,7 @@ public class FhirEtl {
 		
 		FhirEtlOptions options = PipelineOptionsFactory.fromArgs(args).withValidation().as(FhirEtlOptions.class);
 		log.info("Flags: " + options);
-		validateOptions(options);
+		validateOptionsAndInit(options);
 		
 		if (options.isJdbcModeEnabled()) {
 			
