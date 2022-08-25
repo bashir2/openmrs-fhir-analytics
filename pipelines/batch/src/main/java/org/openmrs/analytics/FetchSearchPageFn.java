@@ -13,9 +13,12 @@
 // limitations under the License.
 package org.openmrs.analytics;
 
+import javax.annotation.Nullable;
+
 import java.beans.PropertyVetoException;
 import java.io.IOException;
 import java.sql.SQLException;
+import java.util.Set;
 
 import ca.uhn.fhir.context.FhirContext;
 import ca.uhn.fhir.parser.IParser;
@@ -96,7 +99,7 @@ abstract class FetchSearchPageFn<T> extends DoFn<T, KV<String, Integer>> {
 	
 	private JdbcResourceWriter jdbcWriter;
 	
-	private IParser parser;
+	protected IParser parser;
 	
 	FetchSearchPageFn(FhirEtlOptions options, String stageIdentifier) {
 		this.sinkPath = options.getFhirSinkPath();
@@ -127,6 +130,7 @@ abstract class FetchSearchPageFn<T> extends DoFn<T, KV<String, Integer>> {
 	
 	@Setup
 	public void setup() throws SQLException, PropertyVetoException {
+		log.info("Starting setup for stage " + stageIdentifier + " and object " + this);
 		FhirContext fhirContext = FhirContext.forR4();
 		fhirStoreUtil = FhirStoreUtil.createFhirStoreUtil(sinkPath, sinkUsername, sinkPassword,
 		    fhirContext.getRestfulClientFactory());
@@ -140,6 +144,8 @@ abstract class FetchSearchPageFn<T> extends DoFn<T, KV<String, Integer>> {
 			        sinkDbPassword, initialPoolSize, maxPoolSize), sinkDbTableName, useSingleSinkDbTable, fhirContext);
 		}
 		parser = fhirContext.newJsonParser();
+		// We want to keep the IDs that come inside the resources (not override it by Bundle `fullUrl`).
+		parser.setOverrideResourceIdWithBundleEntryFullUrl(false);
 	}
 	
 	@Teardown
@@ -152,11 +158,25 @@ abstract class FetchSearchPageFn<T> extends DoFn<T, KV<String, Integer>> {
 	}
 	
 	protected void processBundle(Bundle bundle) throws IOException, SQLException {
+		this.processBundle(bundle, null);
+	}
+	
+	protected void processBundle(Bundle bundle, @Nullable Set<String> resourceTypes) throws IOException, SQLException {
 		if (bundle != null && bundle.getEntry() != null) {
 			numFetchedResources.inc(bundle.getEntry().size());
+			for (BundleEntryComponent entry : bundle.getEntry()) {
+				/*
+				Resource resource = entry.getResource();
+				if (resource.fhirType().equals("Patient")) {
+					log.info(" ***** HERE DEBUB id " + resource.getId() + " idElem " + resource.getIdElement().getIdPart()
+					        + " fhirType " + resource.fhirType() + " type " + resource.getResourceType().name() + " JSON "
+					        + parser.encodeResourceToString(resource));
+				}
+				 */
+			}
 			if (!parquetFile.isEmpty()) {
 				long startTime = System.currentTimeMillis();
-				parquetUtil.writeRecords(bundle);
+				parquetUtil.writeRecords(bundle, resourceTypes);
 				totalGenerateTimeMillis.inc(System.currentTimeMillis() - startTime);
 			}
 			if (!this.sinkPath.isEmpty()) {
@@ -165,12 +185,14 @@ abstract class FetchSearchPageFn<T> extends DoFn<T, KV<String, Integer>> {
 				totalPushTimeMillis.inc(System.currentTimeMillis() - pushStartTime);
 			}
 			if (!this.sinkDbUrl.isEmpty()) {
-				if (bundle.getTotal() == 0) {
+				if (bundle.getEntry() == null) {
 					return;
 				}
 				for (BundleEntryComponent entry : bundle.getEntry()) {
 					Resource resource = entry.getResource();
-					jdbcWriter.writeResource(resource);
+					if (resourceTypes != null && resourceTypes.contains(resource.getResourceType().name())) {
+						jdbcWriter.writeResource(resource);
+					}
 				}
 			}
 		}

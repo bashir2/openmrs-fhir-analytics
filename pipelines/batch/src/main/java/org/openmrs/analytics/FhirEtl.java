@@ -33,6 +33,7 @@ import org.apache.avro.Schema;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
 import org.apache.beam.sdk.coders.CannotProvideCoderException;
+import org.apache.beam.sdk.io.FileIO;
 import org.apache.beam.sdk.io.jdbc.JdbcIO;
 import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.apache.beam.sdk.transforms.Create;
@@ -204,6 +205,7 @@ public class FhirEtl {
 		}
 		if (!options.getSinkDbUrl().isEmpty()) {
 			Preconditions.checkArgument(!options.getSinkDbTablePrefix().isEmpty());
+			Preconditions.checkArgument(!options.getResourceList().isEmpty());
 			JdbcResourceWriter.createTables(options);
 		}
 	}
@@ -245,6 +247,22 @@ public class FhirEtl {
 		EtlUtils.logMetrics(result.metrics());
 	}
 	
+	static void runJsonRead(FhirEtlOptions options, FhirContext fhirContext) {
+		// TODO move these to validateOptionsAndInit and add easy to understand error messages.
+		Preconditions.checkArgument(!options.getSourceJsonFilePattern().isEmpty());
+		Preconditions.checkArgument(!options.isJdbcModeEnabled());
+		Preconditions.checkArgument(options.getActivePeriod().isEmpty());
+		
+		Pipeline pipeline = Pipeline.create(options);
+		PCollection<FileIO.ReadableFile> files = pipeline
+		        .apply(FileIO.match().filepattern(options.getSourceJsonFilePattern())).apply(FileIO.readMatches());
+		files.apply("Read JSON files", ParDo.of(new ReadJsonFiles(options)));
+		
+		PipelineResult result = pipeline.run();
+		result.waitUntilFinish();
+		EtlUtils.logMetrics(result.metrics());
+	}
+	
 	public static void main(String[] args)
 	        throws CannotProvideCoderException, PropertyVetoException, IOException, SQLException {
 		// Todo: Autowire
@@ -257,7 +275,6 @@ public class FhirEtl {
 		validateOptionsAndInit(options);
 		
 		if (options.isJdbcModeEnabled()) {
-			
 			if (options.isJdbcModeHapi()) {
 				DatabaseConfiguration dbConfig = DatabaseConfiguration
 				        .createConfigFromFile(options.getFhirDatabaseConfigPath());
@@ -268,6 +285,8 @@ public class FhirEtl {
 				runFhirJdbcFetch(options, dbConfig, fhirContext);
 			}
 			
+		} else if (!options.getSourceJsonFilePattern().isEmpty()) {
+			runJsonRead(options, fhirContext);
 		} else {
 			runFhirFetch(options, fhirContext);
 		}

@@ -201,4 +201,10 @@ public interface FhirEtlOptions extends PipelineOptions {
 	Boolean getUseSingleSinkTable();
 	
 	void setUseSingleSinkTable(Boolean value);
+	
+	@Description("The directory containing input JSON files. Each file should be one Bundle resource.")
+	@Default.String("")
+	String getSourceJsonFilePattern();
+	
+	void setSourceJsonFilePattern(String value);
 }

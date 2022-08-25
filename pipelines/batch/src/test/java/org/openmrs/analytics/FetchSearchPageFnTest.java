@@ -74,7 +74,7 @@ public class FetchSearchPageFnTest {
 		fetchSearchPageFn.processBundle(bundle);
 		
 		// Verify the bundle is sent to the writer.
-		verify(mockParquetUtil).writeRecords(bundleCaptor.capture());
+		verify(mockParquetUtil).writeRecords(bundleCaptor.capture(), null);
 		Bundle capturedBundle = bundleCaptor.getValue();
 		assertThat(bundle, equalTo(capturedBundle));
 	}
